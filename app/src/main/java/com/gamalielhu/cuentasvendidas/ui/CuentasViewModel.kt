@@ -92,6 +92,58 @@ class CuentasViewModel(app: Application) : AndroidViewModel(app) {
     var mensaje by mutableStateOf<String?>(null)
     var cargando by mutableStateOf(false)
 
+    init {
+        cargarSemilla()
+    }
+
+    /**
+     * Datos de fábrica (solo si el APK trae `assets/semilla/`): la primera vez importa las hojas indicadas en
+     * `semilla/hojas.txt` de `registro.xlsx` y las tarjetas de `tarjetas.xlsx`. Los archivos no van en un repo público.
+     */
+    private fun cargarSemilla() {
+        if (prefs.getBoolean("semilla_cargada", false)) return
+        viewModelScope.launch {
+            try {
+                val app = getApplication<Application>()
+                val res = withContext(Dispatchers.IO) {
+                    val assets = app.assets
+                    val archivos = assets.list("semilla").orEmpty().toSet()
+                    if ("registro.xlsx" !in archivos) return@withContext null
+                    if ("tarjetas.xlsx" in archivos) {
+                        val hojas = LectorHojas.leer(assets.open("semilla/tarjetas.xlsx").use { it.readBytes() }, "tarjetas")
+                        val e = tarjetas.edit()
+                        for (h in hojas) {
+                            val enc = Mapeo.detectarEncabezado(h.filas)
+                            val hi = HojaAImportar(h.nombre, h.filas, enc, Mapeo.detectar(h.filas, enc, emptyMap()))
+                            if (!Filas.esSoloTarjetas(hi.mapeo)) continue
+                            Filas.datos(hi).map { Filas.aRegistro(it, hi.mapeo) }
+                                .filter { it.accountEmailOrUser.isNotBlank() && it.cardUsed.isNotBlank() }
+                                .forEach { e.putString(Filas.claveCorreo(it.accountEmailOrUser), it.cardUsed.trim()) }
+                        }
+                        e.commit()
+                    }
+                    val elegidas = if ("hojas.txt" in archivos) {
+                        assets.open("semilla/hojas.txt").bufferedReader().readLines().map { Mapeo.normalizar(it) }.filter { it.isNotEmpty() }
+                    } else emptyList()
+                    val hojas = LectorHojas.leer(assets.open("semilla/registro.xlsx").use { it.readBytes() }, "registro")
+                        .filter { elegidas.isEmpty() || Mapeo.normalizar(it.nombre) in elegidas }
+                        .map { h ->
+                            val enc = Mapeo.detectarEncabezado(h.filas)
+                            HojaAImportar(h.nombre, h.filas, enc, Mapeo.detectar(h.filas, enc, emptyMap()))
+                        }
+                    Importador.importar(db, hojas, tarjetasPorCorreo())
+                }
+                prefs.edit().putBoolean("semilla_cargada", true).apply()
+                if (res != null) {
+                    mensaje = "Cuentas cargadas: ${res.nuevas} nuevas, ${res.actualizadas} actualizadas"
+                    RevisarVencimientosWorker.revisarAhora(getApplication())
+                }
+            } catch (e: Exception) {
+                mensaje = "No se pudieron cargar las cuentas de fábrica: ${e.message ?: e.javaClass.simpleName}"
+            }
+        }
+    }
+
     fun cumple(r: AccountRecord, f: Filtro, hoy: Long): Boolean = when (f) {
         Filtro.TODAS -> true
         Filtro.POR_VENCER -> Vencimientos.estado(r, hoy) == Status.EXPIRING_SOON
