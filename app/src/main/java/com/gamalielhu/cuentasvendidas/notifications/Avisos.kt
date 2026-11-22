@@ -49,6 +49,7 @@ object Avisos {
             if (proveedor) {
                 append("Vence proveedor $fecha · ${r.accountEmailOrUser}")
                 if (r.cardUsed.isNotBlank()) append("\nTarjeta: ${r.cardUsed}")
+                if (r.supplierName.isNotBlank()) append("\nProveedor: ${r.supplierName}")
             } else {
                 append("Avisar a ${r.clientName.ifBlank { "cliente" }} · vence $fecha")
                 append("\nCuenta: ${r.accountEmailOrUser}")
@@ -68,7 +69,7 @@ object Avisos {
             .setContentIntent(abrir)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-        if (!proveedor && r.clientPhone.isNotBlank()) {
+        if (!proveedor && WhatsApp.tieneNumero(r)) {
             val wa = PendingIntent.getActivity(
                 ctx, r.id.toInt(), WhatsApp.intent(r),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
@@ -83,11 +84,17 @@ object Avisos {
 }
 
 object WhatsApp {
-    /** Números bolivianos de 8 dígitos (6xxxxxxx / 7xxxxxxx) reciben el 591 delante. */
+    /** 8 dígitos 6/7 = Bolivia (+591); 9 dígitos con 9 = Perú (+51); si ya trae código, tal cual. */
     private fun numero(tel: String): String {
         val d = tel.filter(Char::isDigit)
-        return if (d.length == 8 && (d[0] == '6' || d[0] == '7')) "591$d" else d
+        return when {
+            d.length == 8 && (d[0] == '6' || d[0] == '7') -> "591$d"
+            d.length == 9 && d[0] == '9' -> "51$d"
+            else -> d
+        }
     }
+
+    fun tieneNumero(r: AccountRecord) = r.clientPhone.count(Char::isDigit) >= 7
 
     fun mensaje(r: AccountRecord): String {
         val fecha = Fechas.formato(r.clientExpiryDate)

@@ -17,28 +17,32 @@ import java.util.zip.ZipInputStream
 import kotlin.math.abs
 import kotlin.math.floor
 
-/** Lee la primera hoja de un .xlsx, .xls o .csv como tabla de textos. */
+data class Hoja(val nombre: String, val filas: List<List<String>>)
+
+/** Lee todas las hojas con datos de un .xlsx, .xls o .csv como tablas de textos. */
 object LectorHojas {
     private const val MAX_COLUMNAS = 100
 
-    fun leer(ctx: Context, uri: Uri): List<List<String>> {
+    fun leer(ctx: Context, uri: Uri, nombreArchivo: String): List<Hoja> {
         val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
             ?: throw IllegalArgumentException("No se pudo abrir el archivo")
-        return leer(bytes)
+        return leer(bytes, nombreArchivo)
     }
 
-    fun leer(bytes: ByteArray): List<List<String>> {
-        val filas = when {
+    fun leer(bytes: ByteArray, nombreArchivo: String): List<Hoja> {
+        val hojas = when {
             bytes.size > 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte() -> leerXlsx(bytes)
             bytes.size > 4 && bytes[0] == 0xD0.toByte() && bytes[1] == 0xCF.toByte() -> leerXls(bytes)
-            else -> leerCsv(bytes)
+            else -> listOf(Hoja(nombreArchivo.substringBeforeLast('.'), leerCsv(bytes)))
         }
-        return filas.map { f -> f.map { it.trim() } }.filter { f -> f.any { it.isNotEmpty() } }
+        return hojas.map { h ->
+            Hoja(h.nombre.trim(), h.filas.map { f -> f.map { it.trim() } }.filter { f -> f.any { it.isNotEmpty() } })
+        }.filter { it.filas.isNotEmpty() }
     }
 
     // ---------- .xlsx (ZIP con XML) ----------
 
-    private fun leerXlsx(bytes: ByteArray): List<List<String>> {
+    private fun leerXlsx(bytes: ByteArray): List<Hoja> {
         val archivos = HashMap<String, ByteArray>()
         ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
             var e = zip.nextEntry
@@ -49,37 +53,41 @@ object LectorHojas {
             }
         }
         val compartidas = archivos["xl/sharedStrings.xml"]?.let(::leerCompartidas) ?: emptyList()
-        val hoja = rutaPrimeraHoja(archivos)?.takeIf { it in archivos }
-            ?: archivos.keys.filter { it.startsWith("xl/worksheets/") && it.endsWith(".xml") }.minOrNull()
-            ?: throw IllegalArgumentException("El Excel no tiene hojas")
-        return leerHoja(archivos.getValue(hoja), compartidas)
+        val hojas = hojasDelLibro(archivos).filter { it.second in archivos }.ifEmpty {
+            archivos.keys.filter { it.startsWith("xl/worksheets/") && it.endsWith(".xml") }.sorted()
+                .map { it.substringAfterLast('/').removeSuffix(".xml") to it }
+        }
+        if (hojas.isEmpty()) throw IllegalArgumentException("El Excel no tiene hojas")
+        return hojas.map { (nombre, ruta) -> Hoja(nombre, leerHoja(archivos.getValue(ruta), compartidas)) }
     }
 
     private fun parser(b: ByteArray): XmlPullParser =
         Xml.newPullParser().apply { setInput(ByteArrayInputStream(b), null) }
 
-    private fun rutaPrimeraHoja(archivos: Map<String, ByteArray>): String? {
-        val libro = archivos["xl/workbook.xml"] ?: return null
-        val rels = archivos["xl/_rels/workbook.xml.rels"] ?: return null
-        var idHoja: String? = null
-        val p = parser(libro)
-        while (idHoja == null && p.next() != XmlPullParser.END_DOCUMENT) {
-            if (p.eventType == XmlPullParser.START_TAG && p.name.substringAfter(':') == "sheet") {
-                idHoja = (0 until p.attributeCount).firstOrNull { p.getAttributeName(it).endsWith(":id") }
-                    ?.let { p.getAttributeValue(it) }
-            }
-        }
-        idHoja ?: return null
+    /** (nombre, ruta) de cada hoja en el orden del libro. */
+    private fun hojasDelLibro(archivos: Map<String, ByteArray>): List<Pair<String, String>> {
+        val libro = archivos["xl/workbook.xml"] ?: return emptyList()
+        val rels = archivos["xl/_rels/workbook.xml.rels"] ?: return emptyList()
+        val destinos = HashMap<String, String>()
         val r = parser(rels)
         while (r.next() != XmlPullParser.END_DOCUMENT) {
-            if (r.eventType == XmlPullParser.START_TAG && r.name.substringAfter(':') == "Relationship" &&
-                r.getAttributeValue(null, "Id") == idHoja
-            ) {
-                val destino = r.getAttributeValue(null, "Target") ?: return null
-                return if (destino.startsWith("/")) destino.trimStart('/') else "xl/$destino"
+            if (r.eventType == XmlPullParser.START_TAG && r.name.substringAfter(':') == "Relationship") {
+                val id = r.getAttributeValue(null, "Id") ?: continue
+                val destino = r.getAttributeValue(null, "Target") ?: continue
+                destinos[id] = if (destino.startsWith("/")) destino.trimStart('/') else "xl/$destino"
             }
         }
-        return null
+        val lista = ArrayList<Pair<String, String>>()
+        val p = parser(libro)
+        while (p.next() != XmlPullParser.END_DOCUMENT) {
+            if (p.eventType == XmlPullParser.START_TAG && p.name.substringAfter(':') == "sheet") {
+                val nombre = p.getAttributeValue(null, "name") ?: "Hoja ${lista.size + 1}"
+                val id = (0 until p.attributeCount).firstOrNull { p.getAttributeName(it).endsWith(":id") }
+                    ?.let { p.getAttributeValue(it) } ?: continue
+                destinos[id]?.let { lista += nombre to it }
+            }
+        }
+        return lista
     }
 
     private fun leerCompartidas(b: ByteArray): List<String> {
@@ -173,15 +181,16 @@ object LectorHojas {
 
     // ---------- .xls (Excel 97-2003) ----------
 
-    private fun leerXls(bytes: ByteArray): List<List<String>> {
+    private fun leerXls(bytes: ByteArray): List<Hoja> {
         val ajustes = WorkbookSettings()
         ajustes.setEncoding("Cp1252")
         ajustes.setSuppressWarnings(true)
         ajustes.setGCDisabled(true)
         val libro = Workbook.getWorkbook(ByteArrayInputStream(bytes), ajustes)
         try {
-            val hoja = libro.sheets.firstOrNull { it.rows > 0 } ?: return emptyList()
-            return (0 until hoja.rows).map { r -> hoja.getRow(r).take(MAX_COLUMNAS).map(::celdaXls) }
+            return libro.sheets.map { hoja ->
+                Hoja(hoja.name, (0 until hoja.rows).map { r -> hoja.getRow(r).take(MAX_COLUMNAS).map(::celdaXls) })
+            }
         } finally {
             libro.close()
         }

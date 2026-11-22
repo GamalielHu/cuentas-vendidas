@@ -72,12 +72,14 @@ fun EditarScreen(vm: CuentasViewModel, inicial: AccountRecord) {
             Campo("Cuenta / correo / usuario", r.accountEmailOrUser, KeyboardType.Email) { r = r.copy(accountEmailOrUser = it) }
             Campo("Contraseña (opcional)", r.password) { r = r.copy(password = it) }
             Campo("Perfil / pantalla (opcional)", r.profile) { r = r.copy(profile = it) }
+            Campo("PIN del perfil (opcional)", r.pin, KeyboardType.Number) { r = r.copy(pin = it) }
             Campo("Cliente", r.clientName) { r = r.copy(clientName = it) }
             Campo("Teléfono del cliente (opcional)", r.clientPhone, KeyboardType.Phone) { r = r.copy(clientPhone = it) }
             Campo("Tarjeta usada", r.cardUsed) { r = r.copy(cardUsed = it) }
             if (tarjetas.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 tarjetas.take(12).forEach { t -> SuggestionChip(onClick = { r = r.copy(cardUsed = t) }, label = { Text(t) }) }
             }
+            Campo("Proveedor (dónde compras/renuevas)", r.supplierName) { r = r.copy(supplierName = it) }
             SelectorFecha("Vence proveedor (real)", r.supplierExpiryDate) { r = r.copy(supplierExpiryDate = it) }
             SelectorFecha("Vence cliente", r.clientExpiryDate) { r = r.copy(clientExpiryDate = it) }
             Row(verticalAlignment = Alignment.CenterVertically) {

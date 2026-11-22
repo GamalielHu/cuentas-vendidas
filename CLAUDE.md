@@ -8,12 +8,17 @@ con dos vencimientos (proveedor/real y cliente), tarjeta usada y avisos 1 día a
 - `data/`: `AccountRecord` (Room, fechas en epochDay, `notifiedSupplierFor/ClientFor` evitan avisos repetidos),
   `Vencimientos.estado` (estado sale de las fechas; RENEWED se respeta hasta que esté por vencer, ≤3 días),
   `AppDatabase`/`AccountDao` (`@Upsert`), `Fechas` (serie Excel, ISO, dd/mm/aaaa día primero, "15 ene 2026").
-- `excel/`: `LectorHojas` (.xlsx a mano con ZIP + XmlPullParser, sin POI; .xls con jxl; .csv),
-  `Mapeo` (detección de columnas por encabezado es/en + contenido; recuerda la elección por nombre de
-  encabezado en prefs `mapeo`), `Importador` (upsert: servicio + cuenta + perfil; si la cuenta se repite en el
-  Excel se distingue por cliente; los vacíos del Excel no borran datos).
+- `excel/`: `LectorHojas` (todas las hojas; .xlsx a mano con ZIP + XmlPullParser, sin POI; .xls con jxl; .csv),
+  `Mapeo` (detección por encabezado es/en + contenido; columnas a la derecha de "PROVEEDOR" son de la cuenta
+  real, así las dos "EXPIRACIÓN" se separan; sin títulos reconoce correos, bancos y fechas; clave de columna
+  `encabezado#n` guardada en prefs `mapeo`), `Filas` (fila -> registro; filas sin cliente ni fechas = sin vender,
+  se omiten; hoja con solo correo + tarjeta asigna tarjetas, guardadas en prefs `tarjetas`), `Importador`
+  (upsert: servicio + cuenta + perfil; el servicio es el nombre de la hoja; los vacíos no borran datos).
+- Excel real de Gamaliel: REGISTRO DE CLIENTES.xlsx (una hoja por servicio, títulos en fila 9: PERFIL, NOMBRE,
+  CELULAR, PIN, CORREO, CLAVE, PRECIO, EXPIRACIÓN (cliente, a veces "10/11" sin año), …, PROVEEDOR, PRECIO,
+  EXPIRACIÓN (proveedor)) y TARJETAS USADAS.xlsx (sin títulos: B correo, C tarjeta).
 - `workers/RevisarVencimientosWorker`: periódico 24 h (primero a las 9:00) + al abrir/importar/guardar.
-- `notifications/Avisos` (canal `vencimientos`, acción WhatsApp) y `WhatsApp` (8 dígitos 6/7 → +591).
+- `notifications/Avisos` (canal `vencimientos`, acción WhatsApp) y `WhatsApp` (8 dígitos 6/7 → +591, 9 dígitos con 9 → +51).
 - `ui/`: `CuentasViewModel` (navegación por `Pantalla`), `ListaScreen`, `EditarScreen`, `ImportarScreen`.
 
 ## Compilar

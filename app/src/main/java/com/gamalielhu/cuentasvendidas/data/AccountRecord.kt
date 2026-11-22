@@ -12,9 +12,12 @@ data class AccountRecord(
     val accountEmailOrUser: String = "",
     val password: String = "",
     val profile: String = "",
+    val pin: String = "",
     val clientName: String = "",
     val clientPhone: String = "",
     val cardUsed: String = "",
+    /** Dónde compras o renuevas la cuenta. */
+    val supplierName: String = "",
     /** Vencimiento real: donde compras o renuevas la cuenta. */
     val supplierExpiryDate: Long? = null,
     /** Vencimiento de la venta al cliente. */

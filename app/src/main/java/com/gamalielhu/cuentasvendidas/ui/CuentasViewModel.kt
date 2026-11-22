@@ -14,6 +14,8 @@ import com.gamalielhu.cuentasvendidas.data.AppDatabase
 import com.gamalielhu.cuentasvendidas.data.Status
 import com.gamalielhu.cuentasvendidas.data.Vencimientos
 import com.gamalielhu.cuentasvendidas.excel.Campo
+import com.gamalielhu.cuentasvendidas.excel.Filas
+import com.gamalielhu.cuentasvendidas.excel.HojaAImportar
 import com.gamalielhu.cuentasvendidas.excel.Importador
 import com.gamalielhu.cuentasvendidas.excel.LectorHojas
 import com.gamalielhu.cuentasvendidas.excel.Mapeo
@@ -41,21 +43,42 @@ sealed interface Pantalla {
     data object Importar : Pantalla
 }
 
+data class HojaImport(val nombre: String, val filas: List<List<String>>, val encabezado: Int) {
+    val enc: List<String> get() = if (encabezado < 0) emptyList() else filas.getOrNull(encabezado).orEmpty()
+    val encNormal: List<String> get() = enc.map(Mapeo::normalizar)
+    val columnas: Int get() = filas.maxOfOrNull { it.size } ?: 0
+}
+
+/**
+ * @param elecciones lo que el usuario cambió: campo -> clave de columna (null = "no usar"). Se aplica a
+ * todas las hojas elegidas; lo que no eligió se detecta solo en cada hoja.
+ */
 data class VistaImportacion(
     val nombre: String,
-    val filas: List<List<String>>,
-    val filaEncabezado: Int,
-    val mapeo: Map<Campo, Int>,
+    val hojas: List<HojaImport>,
+    val seleccionadas: Set<Int>,
+    val vista: Int,
+    val elecciones: Map<Campo, String?>,
+    val guardado: Map<Campo, String>,
 ) {
-    val columnas: Int get() = filas.maxOfOrNull { it.size } ?: 0
-    val encabezado: List<String> get() = filas.getOrNull(filaEncabezado).orEmpty()
-    val datos: List<List<String>> get() = filas.drop(filaEncabezado + 1)
+    val hoja: HojaImport get() = hojas[vista]
+
+    fun mapeo(h: HojaImport): Map<Campo, Int> {
+        val preferidas = guardado.toMutableMap()
+        elecciones.forEach { (c, k) -> if (k == null) preferidas.remove(c) else preferidas[c] = k }
+        val excluidas = elecciones.filterValues { it == null }.keys
+        return Mapeo.detectar(h.filas, h.encabezado, preferidas, excluidas)
+    }
+
+    fun aImportar(h: HojaImport) = HojaAImportar(h.nombre, h.filas, h.encabezado, mapeo(h))
 }
 
 class CuentasViewModel(app: Application) : AndroidViewModel(app) {
     private val db = AppDatabase.get(app)
     private val dao = db.dao()
     private val prefs = app.getSharedPreferences("mapeo", Context.MODE_PRIVATE)
+    /** correo -> tarjeta (del Excel de tarjetas); se aplica también a lo que se importe después. */
+    private val tarjetas = app.getSharedPreferences("tarjetas", Context.MODE_PRIVATE)
 
     val todas: StateFlow<List<AccountRecord>> = dao.observar()
         .map { lista -> lista.sortedWith(compareBy<AccountRecord, Long?>(nullsLast()) { Vencimientos.proxima(it) }) }
@@ -127,17 +150,34 @@ class CuentasViewModel(app: Application) : AndroidViewModel(app) {
     private fun mapeoGuardado(): Map<Campo, String> =
         Campo.entries.mapNotNull { c -> prefs.getString(c.name, null)?.let { c to it } }.toMap()
 
+    private fun tarjetasPorCorreo(): Map<String, String> =
+        tarjetas.all.mapNotNull { (k, v) -> (v as? String)?.let { k to it } }.toMap()
+
     fun abrirArchivo(uri: Uri) {
         viewModelScope.launch {
             cargando = true
             try {
                 val app = getApplication<Application>()
-                val (nombre, filas) = withContext(Dispatchers.IO) { nombreDe(uri) to LectorHojas.leer(app, uri) }
-                if (filas.isEmpty()) {
+                val nombre = withContext(Dispatchers.IO) { nombreDe(uri) }
+                val leidas = withContext(Dispatchers.IO) { LectorHojas.leer(app, uri, nombre) }
+                if (leidas.isEmpty()) {
                     mensaje = "El archivo está vacío"
                 } else {
-                    val enc = Mapeo.detectarEncabezado(filas)
-                    importacion = VistaImportacion(nombre, filas, enc, Mapeo.detectar(filas, enc, mapeoGuardado()))
+                    val hojas = leidas.map { HojaImport(it.nombre, it.filas, Mapeo.detectarEncabezado(it.filas)) }
+                    val guardado = mapeoGuardado()
+                    val base = VistaImportacion(nombre, hojas, emptySet(), 0, emptyMap(), guardado)
+                    // Hojas elegidas la vez anterior; si no, la que más cuentas vendidas tiene.
+                    val antes = prefs.getStringSet("hojas", emptySet()).orEmpty()
+                    var sel = hojas.indices.filter { hojas[it].nombre in antes }.toSet()
+                    if (sel.isEmpty()) {
+                        val utiles = hojas.indices.associateWith { i ->
+                            val h = base.aImportar(hojas[i])
+                            Filas.datos(h).map { Filas.aRegistro(it, h.mapeo) }
+                                .count { !Filas.vacia(it) && (!Filas.sinVender(it) || Filas.esSoloTarjetas(h.mapeo)) }
+                        }
+                        sel = setOf(utiles.maxByOrNull { it.value }?.key ?: 0)
+                    }
+                    importacion = base.copy(seleccionadas = sel, vista = sel.min())
                     pantalla = Pantalla.Importar
                 }
             } catch (e: Exception) {
@@ -153,45 +193,78 @@ class CuentasViewModel(app: Application) : AndroidViewModel(app) {
             ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
     }.getOrNull() ?: "Excel"
 
+    /** Tocar una hoja: la muestra; si ya se estaba viendo, la marca o desmarca para importar. */
+    fun tocarHoja(i: Int) {
+        val imp = importacion ?: return
+        importacion = when {
+            i != imp.vista && i !in imp.seleccionadas -> imp.copy(vista = i, seleccionadas = imp.seleccionadas + i)
+            i != imp.vista -> imp.copy(vista = i)
+            i in imp.seleccionadas && imp.seleccionadas.size > 1 -> imp.copy(seleccionadas = imp.seleccionadas - i)
+            else -> imp.copy(seleccionadas = imp.seleccionadas + i)
+        }
+    }
+
     fun cambiarEncabezado(fila: Int) {
         val imp = importacion ?: return
-        val f = fila.coerceIn(0, (imp.filas.size - 1).coerceAtLeast(0))
-        importacion = imp.copy(filaEncabezado = f, mapeo = Mapeo.detectar(imp.filas, f, emptyMap()))
+        val h = imp.hoja
+        val f = fila.coerceIn(-1, (h.filas.size - 1).coerceAtLeast(0))
+        importacion = imp.copy(hojas = imp.hojas.toMutableList().also { it[imp.vista] = h.copy(encabezado = f) })
     }
 
     fun cambiarColumna(campo: Campo, columna: Int?) {
         val imp = importacion ?: return
-        val m = imp.mapeo.toMutableMap()
-        if (columna == null) m.remove(campo) else {
-            m.entries.removeAll { it.value == columna } // una columna, un solo dato
-            m[campo] = columna
+        val clave = columna?.let { Mapeo.claveColumna(imp.hoja.encNormal, it) }
+        val e = imp.elecciones.toMutableMap()
+        if (columna != null) {
+            // una columna, un solo dato
+            imp.mapeo(imp.hoja).filter { it.value == columna && it.key != campo }.keys.forEach { e[it] = null }
         }
-        importacion = imp.copy(mapeo = m)
+        e[campo] = clave
+        importacion = imp.copy(elecciones = e)
     }
 
     fun confirmarImportacion() {
         val imp = importacion ?: return
-        if (Campo.CUENTA !in imp.mapeo && Campo.CLIENTE !in imp.mapeo) {
+        val hojas = imp.seleccionadas.sorted().map { imp.aImportar(imp.hojas[it]) }
+        if (hojas.isEmpty()) { mensaje = "Elige al menos una hoja"; return }
+        if (hojas.any { Campo.CUENTA !in it.mapeo && Campo.CLIENTE !in it.mapeo }) {
             mensaje = "Elige al menos la columna de la cuenta o del cliente"
             return
         }
         viewModelScope.launch {
             cargando = true
             try {
-                val res = withContext(Dispatchers.IO) {
-                    Importador.importar(db, imp.filas, imp.filaEncabezado, imp.mapeo)
+                val (deTarjetas, deCuentas) = hojas.partition { Filas.esSoloTarjetas(it.mapeo) }
+                val partes = ArrayList<String>()
+                if (deTarjetas.isNotEmpty()) {
+                    val nuevas = deTarjetas.flatMap { h ->
+                        Filas.datos(h).mapNotNull { f ->
+                            val r = Filas.aRegistro(f, h.mapeo)
+                            if (r.accountEmailOrUser.isBlank() || r.cardUsed.isBlank()) null
+                            else Filas.claveCorreo(r.accountEmailOrUser) to r.cardUsed.trim()
+                        }
+                    }.toMap()
+                    tarjetas.edit().apply { nuevas.forEach { (k, v) -> putString(k, v) } }.apply()
+                    val n = withContext(Dispatchers.IO) { Importador.asignarTarjetas(db, tarjetasPorCorreo() + nuevas) }
+                    partes += "${nuevas.size} correos con tarjeta ($n cuentas actualizadas)"
                 }
-                // Recordar las columnas elegidas (por nombre de encabezado) para el próximo Excel.
+                if (deCuentas.isNotEmpty()) {
+                    val res = withContext(Dispatchers.IO) { Importador.importar(db, deCuentas, tarjetasPorCorreo()) }
+                    partes += "${res.nuevas} nuevas, ${res.actualizadas} actualizadas" +
+                        if (res.sinVender > 0) ", ${res.sinVender} sin vender omitidas" else ""
+                }
+                // Recordar hojas y columnas elegidas (por clave de columna) para el próximo Excel.
+                val m = imp.mapeo(imp.hoja)
                 val e = prefs.edit()
                 Campo.entries.forEach { c ->
-                    val col = imp.mapeo[c]
-                    if (col == null) e.remove(c.name) else e.putString(c.name, Mapeo.normalizar(imp.encabezado.getOrNull(col).orEmpty()))
+                    val col = m[c]
+                    if (col == null) e.remove(c.name) else e.putString(c.name, Mapeo.claveColumna(imp.hoja.encNormal, col))
                 }
+                e.putStringSet("hojas", imp.seleccionadas.map { imp.hojas[it].nombre }.toSet())
                 e.apply()
                 importacion = null
                 pantalla = Pantalla.Lista
-                mensaje = "Importado: ${res.nuevas} nuevas, ${res.actualizadas} actualizadas" +
-                    if (res.omitidas > 0) ", ${res.omitidas} filas sin cuenta ni cliente omitidas" else ""
+                mensaje = "Importado: " + partes.joinToString("; ")
                 RevisarVencimientosWorker.revisarAhora(getApplication())
             } catch (e: Exception) {
                 mensaje = "Error al importar: ${e.message ?: e.javaClass.simpleName}"

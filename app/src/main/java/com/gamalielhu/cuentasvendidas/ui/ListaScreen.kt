@@ -175,7 +175,7 @@ private fun TarjetaCuenta(r: AccountRecord, hoy: Long, vm: CuentasViewModel) {
                             text = { Text("Renovar proveedor +1 mes") },
                             onClick = { menu = false; vm.renovar(r, proveedor = true) },
                         )
-                        if (r.clientPhone.isNotBlank()) DropdownMenuItem(
+                        if (WhatsApp.tieneNumero(r)) DropdownMenuItem(
                             text = { Text("Avisar al cliente por WhatsApp") },
                             onClick = { menu = false; WhatsApp.abrir(ctx, r) },
                         )
@@ -187,6 +187,7 @@ private fun TarjetaCuenta(r: AccountRecord, hoy: Long, vm: CuentasViewModel) {
                                     append(r.accountEmailOrUser)
                                     if (r.password.isNotBlank()) append("\n${r.password}")
                                     if (r.profile.isNotBlank()) append("\nPerfil: ${r.profile}")
+                                    if (r.pin.isNotBlank()) append("\nPIN: ${r.pin}")
                                 }))
                                 vm.mensaje = "Copiado"
                             },
@@ -202,7 +203,7 @@ private fun TarjetaCuenta(r: AccountRecord, hoy: Long, vm: CuentasViewModel) {
                 style = MaterialTheme.typography.bodyMedium,
             )
             Text(
-                "Tarjeta: " + r.cardUsed.ifBlank { "—" },
+                "Tarjeta: " + r.cardUsed.ifBlank { "—" } + if (r.supplierName.isNotBlank()) "  ·  Proveedor: ${r.supplierName}" else "",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.secondary,
             )

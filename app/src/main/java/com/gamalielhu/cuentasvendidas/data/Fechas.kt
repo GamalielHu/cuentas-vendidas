@@ -8,6 +8,7 @@ object Fechas {
     private val formato = DateTimeFormatter.ofPattern("dd/MM/yyyy")
     private val iso = Regex("^(\\d{4})[-/.](\\d{1,2})[-/.](\\d{1,2})")
     private val dma = Regex("^(\\d{1,2})[-/.](\\d{1,2})[-/.](\\d{2,4})")
+    private val sinAnio = Regex("^(\\d{1,2})[-/.](\\d{1,2})$")
     private val texto = Regex("^(\\d{1,2})\\s*(?:de\\s+)?([a-z]{3,})\\.?\\s*(?:de\\s+|del\\s+)?(\\d{2,4})")
     private val sinTildes = Regex("\\p{Mn}+")
     private val meses = mapOf(
@@ -36,6 +37,15 @@ object Fechas {
             if (a < 100) a += 2000
             if (me > 12 && d <= 12) { val t = d; d = me; me = t }
             return crear(a, me, d)
+        }
+        // "10/11" (día/mes sin año): el año que deja la fecha más cerca de hoy.
+        sinAnio.find(s)?.let { m ->
+            var d = m.groupValues[1].toInt()
+            var me = m.groupValues[2].toInt()
+            if (me > 12 && d <= 12) { val t = d; d = me; me = t }
+            val hoy = LocalDate.now()
+            return (hoy.year - 1..hoy.year + 1).mapNotNull { a -> crear(a, me, d) }
+                .minByOrNull { kotlin.math.abs(it - hoy.toEpochDay()) }
         }
         texto.find(s)?.let { m ->
             val me = meses[m.groupValues[2].take(3)] ?: return null
