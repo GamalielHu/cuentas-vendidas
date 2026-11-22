@@ -64,30 +64,34 @@ object LectorHojas {
     private fun parser(b: ByteArray): XmlPullParser =
         Xml.newPullParser().apply { setInput(ByteArrayInputStream(b), null) }
 
-    /** (nombre, ruta) de cada hoja en el orden del libro. */
+    private val reRelacion = Regex("<(?:\\w+:)?Relationship\\b([^>]*)>")
+    private val reHoja = Regex("<(?:\\w+:)?sheet\\b([^>]*)>")
+    private val reAtributo = Regex("([\\w:]+)\\s*=\\s*(\"([^\"]*)\"|'([^']*)')")
+
+    private fun atributos(texto: String): Map<String, String> =
+        reAtributo.findAll(texto).associate { m ->
+            m.groupValues[1] to xmlTexto(m.groupValues[3].ifEmpty { m.groupValues[4] })
+        }
+
+    private fun xmlTexto(s: String) = s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"")
+        .replace("&apos;", "'").replace("&amp;", "&")
+
+    /** (nombre, ruta) de cada hoja en el orden del libro. Con regex: no depende del parser XML del celular. */
     private fun hojasDelLibro(archivos: Map<String, ByteArray>): List<Pair<String, String>> {
-        val libro = archivos["xl/workbook.xml"] ?: return emptyList()
-        val rels = archivos["xl/_rels/workbook.xml.rels"] ?: return emptyList()
-        val destinos = HashMap<String, String>()
-        val r = parser(rels)
-        while (r.next() != XmlPullParser.END_DOCUMENT) {
-            if (r.eventType == XmlPullParser.START_TAG && r.name.substringAfter(':') == "Relationship") {
-                val id = r.getAttributeValue(null, "Id") ?: continue
-                val destino = r.getAttributeValue(null, "Target") ?: continue
-                destinos[id] = if (destino.startsWith("/")) destino.trimStart('/') else "xl/$destino"
-            }
-        }
-        val lista = ArrayList<Pair<String, String>>()
-        val p = parser(libro)
-        while (p.next() != XmlPullParser.END_DOCUMENT) {
-            if (p.eventType == XmlPullParser.START_TAG && p.name.substringAfter(':') == "sheet") {
-                val nombre = p.getAttributeValue(null, "name") ?: "Hoja ${lista.size + 1}"
-                val id = (0 until p.attributeCount).firstOrNull { p.getAttributeName(it).endsWith(":id") }
-                    ?.let { p.getAttributeValue(it) } ?: continue
-                destinos[id]?.let { lista += nombre to it }
-            }
-        }
-        return lista
+        val libro = archivos["xl/workbook.xml"]?.toString(Charsets.UTF_8) ?: return emptyList()
+        val rels = archivos["xl/_rels/workbook.xml.rels"]?.toString(Charsets.UTF_8) ?: return emptyList()
+        val destinos = reRelacion.findAll(rels).mapNotNull { m ->
+            val a = atributos(m.groupValues[1])
+            val id = a["Id"] ?: return@mapNotNull null
+            val destino = a["Target"] ?: return@mapNotNull null
+            id to (if (destino.startsWith("/")) destino.trimStart('/') else "xl/" + destino.removePrefix("./"))
+        }.toMap()
+        return reHoja.findAll(libro).mapNotNull { m ->
+            val a = atributos(m.groupValues[1])
+            val id = a.entries.firstOrNull { it.key.endsWith(":id") }?.value ?: return@mapNotNull null
+            val nombre = a["name"] ?: return@mapNotNull null
+            destinos[id]?.let { nombre to it }
+        }.toList()
     }
 
     private fun leerCompartidas(b: ByteArray): List<String> {

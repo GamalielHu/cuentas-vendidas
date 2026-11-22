@@ -75,6 +75,13 @@ object Importador {
         else "${n(r.serviceName)}|${n(r.accountEmailOrUser)}|${n(r.profile)}"
     }
 
+    private val hojaGenerica = Regex("^sheet\\d+$", RegexOption.IGNORE_CASE)
+
+    /** v1.2 guardaba "sheet3" como servicio: esas cuentas se reconocen sin mirar el servicio y se corrigen. */
+    private fun mismaCuenta(existente: AccountRecord, k: String, nueva: AccountRecord): Boolean =
+        clave(existente) == k || (hojaGenerica.matches(existente.serviceName.trim()) &&
+            clave(existente.copy(serviceName = nueva.serviceName)) == k)
+
     suspend fun importar(
         db: AppDatabase,
         hojas: List<HojaAImportar>,
@@ -98,7 +105,7 @@ object Importador {
             for (p in validos) {
                 val k = clave(p)
                 val cliente = Mapeo.normalizar(p.clientName)
-                val candidatos = existentes.filter { clave(it) == k && it.id !in tocados }
+                val candidatos = existentes.filter { mismaCuenta(it, k, p) && it.id !in tocados }
                 val previo = if ((repetidas[k] ?: 0) > 1) {
                     candidatos.firstOrNull { Mapeo.normalizar(it.clientName) == cliente }
                 } else {
